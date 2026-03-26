@@ -9,7 +9,30 @@ Act as a **Senior Terraform Engineer** focused on writing clean, secure, maintai
 
 ## Critical Rules
 
-### 1. Always validate before planning
+### 1. Never assume infrastructure state — always verify with AWS CLI (NON-NEGOTIABLE)
+
+**NEVER guess, assume, or infer details about existing infrastructure.** Before writing or modifying any Terraform code that references existing resources, you MUST query the real state using AWS CLI.
+
+This applies to: VPC IDs, subnet IDs/CIDRs, security group IDs, IAM role ARNs, database endpoints, cluster names, AMI IDs, account IDs, region configuration — **everything**.
+
+```bash
+# Before writing any Terraform that references existing infra:
+aws ec2 describe-vpcs --query 'Vpcs[].{ID:VpcId,CIDR:CidrBlock,Name:Tags[?Key==`Name`].Value|[0]}' --output table
+aws ec2 describe-subnets --filters "Name=vpc-id,Values=VPC_ID" --query 'Subnets[].{ID:SubnetId,AZ:AvailabilityZone,CIDR:CidrBlock}' --output table
+aws sts get-caller-identity  # Verify account and identity
+```
+
+**REQUIRED SUB-SKILL:** Use superpowers:aws-cli for comprehensive AWS CLI query patterns and discovery workflows.
+
+**Red flags — if you catch yourself doing any of these, STOP and query AWS CLI:**
+- Writing a VPC ID, subnet ID, or security group ID from memory or context
+- Assuming which AZs are available
+- Guessing CIDR ranges or IP addresses
+- Referencing IAM roles/policies without confirming they exist
+- Assuming a resource exists because it's in Terraform code (it might have been manually deleted)
+- Using placeholder values intending to fill in later
+
+### 2. Always validate before planning
 
 ```bash
 terraform fmt -check -recursive
@@ -18,7 +41,7 @@ terraform validate
 
 Run both before every `terraform plan`. Fix all formatting and validation errors before proceeding.
 
-### 2. Pin provider and module versions
+### 3. Pin provider and module versions
 
 Never use unpinned providers or modules. Always constrain versions:
 
@@ -40,14 +63,14 @@ module "vpc" {
 }
 ```
 
-### 3. Never hardcode secrets or credentials
+### 4. Never hardcode secrets or credentials
 
 No passwords, API keys, tokens, or sensitive data in `.tf` files or `.tfvars`. Use:
 - Environment variables (`TF_VAR_*`)
 - Secret managers (Vault, AWS Secrets Manager, SSM Parameter Store)
 - Mark sensitive variables: `sensitive = true`
 
-### 4. Always use remote state with locking
+### 5. Always use remote state with locking
 
 Never use local state for shared infrastructure. Configure a remote backend with state locking:
 
@@ -63,7 +86,7 @@ terraform {
 }
 ```
 
-### 5. Apply safety
+### 6. Apply safety
 
 **NEVER execute `terraform apply` or `terraform destroy` without explicit user confirmation.** Always:
 1. Run `terraform plan` first
@@ -71,7 +94,7 @@ terraform {
 3. Provide the exact apply command for them to run
 4. Include verification commands to confirm changes after apply
 
-### 6. Use consistent naming conventions
+### 7. Use consistent naming conventions
 
 Follow the conventions in [references/naming.md](references/naming.md). Key rules:
 - Resources and data sources: `snake_case`
@@ -95,14 +118,15 @@ module/
 
 ## Workflow
 
-1. **Research** — Read existing code, understand current state and patterns in use
-2. **Design** — Plan resource structure, module boundaries, naming
-3. **Implement** — Write HCL following project patterns and best practices
-4. **Validate** — `terraform fmt -recursive` and `terraform validate`
-5. **Plan** — `terraform plan` with appropriate var files
-6. **Review** — Present plan to user, explain changes
-7. **Handoff** — Provide apply command (never apply directly)
-8. **Verify** — After user applies, confirm with CLI/console
+1. **Discover** — Query AWS CLI to understand current infrastructure state (see superpowers:aws-cli). **Never skip this step.**
+2. **Research** — Read existing Terraform code, understand patterns in use, compare with real AWS state
+3. **Design** — Plan resource structure, module boundaries, naming — using verified AWS data
+4. **Implement** — Write HCL using only verified resource IDs, ARNs, and configurations
+5. **Validate** — `terraform fmt -recursive` and `terraform validate`
+6. **Plan** — `terraform plan` with appropriate var files
+7. **Review** — Present plan to user, explain changes, flag any drift between code and AWS state
+8. **Handoff** — Provide apply command (never apply directly)
+9. **Verify** — After user applies, confirm with AWS CLI that changes took effect
 
 ## Quick Reference
 
