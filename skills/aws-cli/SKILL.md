@@ -9,7 +9,44 @@ Use AWS CLI to **query real infrastructure state** before making assumptions. Ne
 
 ## Critical Rules
 
-### 1. Never assume — always verify
+### 1. Read-only — NEVER modify AWS resources directly (NON-NEGOTIABLE)
+
+**AWS CLI is for READING infrastructure state only.** Never use AWS CLI to create, modify, or delete resources. All infrastructure changes MUST go through Terraform (or other IaC tools).
+
+**FORBIDDEN commands — never execute these:**
+- `aws * create-*`, `aws * update-*`, `aws * modify-*`, `aws * delete-*`, `aws * put-*`
+- `aws * terminate-*`, `aws * remove-*`, `aws * detach-*`, `aws * deregister-*`
+- `aws * start-*`, `aws * stop-*`, `aws * reboot-*` (for resources)
+- `aws s3 rm`, `aws s3 cp`, `aws s3 mv`, `aws s3 sync` (to modify bucket contents)
+- Any command that changes infrastructure state
+
+**ALLOWED commands — read-only operations:**
+- `aws * describe-*`, `aws * list-*`, `aws * get-*`
+- `aws sts get-caller-identity`
+- `aws ce get-cost-and-usage`
+- `aws logs filter-log-events`, `aws logs get-log-events`
+- `aws s3 ls`, `aws s3api head-object`
+- Any command that only reads state
+
+**If you need to change infrastructure:** Write Terraform code and follow the superpowers:terraform workflow (plan → handoff to user → user applies).
+
+### 2. Never run destructive commands — human applies (NON-NEGOTIABLE)
+
+**NEVER execute `terraform apply`, `terraform destroy`, or any command that modifies live infrastructure.** These commands must always be run by the human operator.
+
+When changes are needed:
+1. Write the Terraform code
+2. Run `terraform plan` to show what will change
+3. Present the plan and the exact apply command to the user
+4. **The user runs the apply command themselves**
+
+This applies to ALL destructive or state-modifying operations:
+- `terraform apply` / `terraform destroy`
+- `terraform state rm` / `terraform state mv` (present commands, let user run them)
+- `terraform import` (present commands, let user run them)
+- Any AWS CLI write command (see Rule #1)
+
+### 3. Never assume — always verify
 
 **NEVER assume any detail about existing infrastructure.** Before writing Terraform, CloudFormation, CDK, or any IaC code that references existing resources, verify with AWS CLI:
 
@@ -24,7 +61,7 @@ aws ec2 describe-subnets --filters "Name=vpc-id,Values=vpc-xxxxx" --query 'Subne
 aws ec2 describe-security-groups --filters "Name=vpc-id,Values=vpc-xxxxx" --query 'SecurityGroups[].{ID:GroupId,Name:GroupName,Description:Description}' --output table
 ```
 
-### 2. Use structured output
+### 4. Use structured output
 
 Always use `--query` (JMESPath) and `--output table|json` for readable, parseable results:
 
@@ -36,7 +73,7 @@ aws ec2 describe-instances --query 'Reservations[].Instances[].{ID:InstanceId,Ty
 aws ec2 describe-instances --instance-ids i-1234567890abcdef0 --output json
 ```
 
-### 3. Filter before fetching
+### 5. Filter before fetching
 
 Use server-side `--filters` to reduce response size, not client-side `jq`:
 
@@ -48,7 +85,7 @@ aws ec2 describe-instances --filters "Name=instance-state-name,Values=running" "
 aws ec2 describe-instances | jq '.Reservations[].Instances[] | select(.State.Name == "running")'
 ```
 
-### 4. Always specify region when ambiguous
+### 6. Always specify region when ambiguous
 
 ```bash
 # Explicit region
