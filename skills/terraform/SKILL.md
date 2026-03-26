@@ -86,13 +86,37 @@ terraform {
 }
 ```
 
-### 6. Apply safety
+### 6. Never run destructive commands — human applies (NON-NEGOTIABLE)
 
-**NEVER execute `terraform apply` or `terraform destroy` without explicit user confirmation.** Always:
-1. Run `terraform plan` first
+**NEVER execute `terraform apply`, `terraform destroy`, or any state-modifying command.** These commands MUST be run by the human operator — no exceptions.
+
+**FORBIDDEN — never execute these yourself:**
+- `terraform apply` (with or without `-auto-approve`)
+- `terraform destroy`
+- `terraform state rm` / `terraform state mv`
+- `terraform import` (CLI version)
+- `terraform force-unlock`
+- Any AWS CLI write command (`create-*`, `update-*`, `delete-*`, `modify-*`, `put-*`, `terminate-*`)
+
+**ALLOWED — you can run these freely:**
+- `terraform init`
+- `terraform fmt` / `terraform fmt -check`
+- `terraform validate`
+- `terraform plan` (read-only, generates plan)
+- `terraform show`
+- `terraform state list` / `terraform state show` (read-only state inspection)
+- `terraform output`
+- `terraform providers`
+- AWS CLI read-only commands (`describe-*`, `list-*`, `get-*`)
+
+**Workflow for changes:**
+1. Run `terraform plan` to show what will change
 2. Present the plan summary to the user
-3. Provide the exact apply command for them to run
-4. Include verification commands to confirm changes after apply
+3. Provide the **exact** apply command for the user to run
+4. Include post-apply verification commands (AWS CLI)
+5. **Wait for the user to run the command and report back**
+
+If the user asks you to run apply or destroy, remind them that destructive commands must be executed by a human operator and provide the command for them to run.
 
 ### 7. Use consistent naming conventions
 
