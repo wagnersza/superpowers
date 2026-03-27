@@ -2,13 +2,284 @@
 
 ## Table of Contents
 
+- [TDD with Terraform Test](#tdd-with-terraform-test)
+- [Test Scope Rules](#test-scope-rules)
+- [Test Patterns by Resource Type](#test-patterns-by-resource-type)
 - [Built-in Validation](#built-in-validation)
 - [Linting with tflint](#linting-with-tflint)
 - [Security Scanning](#security-scanning)
-- [Terraform Test Framework](#terraform-test-framework)
-- [Integration Testing with Terratest](#integration-testing-with-terratest)
 - [Plan Review Practices](#plan-review-practices)
 - [CI/CD Pipeline Patterns](#cicd-pipeline-patterns)
+
+## TDD with Terraform Test
+
+**`terraform test` is the primary testing tool.** Follow the RED-GREEN-REFACTOR cycle from superpowers:test-driven-development:
+
+### The TDD Cycle for Terraform
+
+```
+1. RED    — Write .tftest.hcl with assertions for the new resource
+           Run `terraform test` → FAIL (resource doesn't exist yet)
+
+2. GREEN  — Write minimal .tf code to make the test pass
+           Run `terraform test` → PASS
+
+3. REFACTOR — Clean up, improve naming, extract modules
+             Run `terraform test` → still PASS
+```
+
+### Writing tests FIRST
+
+```hcl
+# tests/s3_data_bucket.tftest.hcl — Write THIS before any resource code
+
+variables {
+  project     = "myapp"
+  environment = "test"
+}
+
+run "verify_bucket_naming_and_security" {
+  command = plan  # Plan mode — no real resources, no cost
+
+  # Naming convention
+  assert {
+    condition     = aws_s3_bucket.data.bucket == "myapp-test-data"
+    error_message = "Bucket name must follow {project}-{env}-{purpose} convention"
+  }
+
+  # Security: public access blocked
+  assert {
+    condition     = aws_s3_bucket_public_access_block.data.block_public_acls == true
+    error_message = "Public ACLs must be blocked"
+  }
+
+  assert {
+    condition     = aws_s3_bucket_public_access_block.data.block_public_policy == true
+    error_message = "Public policy must be blocked"
+  }
+
+  # Security: encryption enabled
+  assert {
+    condition     = aws_s3_bucket_server_side_encryption_configuration.data.rule[0].apply_server_side_encryption_by_default[0].sse_algorithm == "aws:kms"
+    error_message = "Must use KMS encryption"
+  }
+
+  # Versioning enabled
+  assert {
+    condition     = aws_s3_bucket_versioning.data.versioning_configuration[0].status == "Enabled"
+    error_message = "Versioning must be enabled"
+  }
+}
+```
+
+### Running tests
+
+```bash
+# Run all tests
+terraform test
+
+# Run specific test file
+terraform test -filter=tests/s3_data_bucket.tftest.hcl
+
+# Verbose output (shows each assertion)
+terraform test -verbose
+```
+
+### Test file structure
+
+```
+module/
+  main.tf
+  variables.tf
+  outputs.tf
+  tests/
+    s3_data_bucket.tftest.hcl      # One file per logical resource group
+    iam_service_role.tftest.hcl
+    ecs_service.tftest.hcl
+```
+
+### Plan mode vs Apply mode
+
+```hcl
+# PLAN MODE (preferred) — fast, free, no real resources
+run "verify_config" {
+  command = plan
+  assert { ... }
+}
+
+# APPLY MODE — creates real resources, use only when you must verify runtime behavior
+run "verify_runtime" {
+  command = apply
+  assert {
+    condition     = output.endpoint != ""
+    error_message = "Endpoint must be available after creation"
+  }
+}
+```
+
+**Default to `command = plan`** — it catches most configuration issues without cost or risk. Use `command = apply` only when you need to verify outputs, computed values, or cross-resource behavior that plan cannot evaluate.
+
+## Test Scope Rules
+
+### MUST test (new resources)
+
+Write tests for ALL new resources before writing the resource code:
+
+- Naming convention compliance
+- Security configuration (encryption, public access, IAM)
+- Required tags
+- Variable validation (correct types, constraints)
+- Conditional logic (feature flags, count/for_each)
+- Output values
+
+### Do NOT test (unless asked)
+
+- **Existing/old infrastructure** — don't retroactively add tests
+- **Resources you didn't create or modify** — not your scope
+- **Third-party module internals** — test your usage, not the module's implementation
+
+### Test when modifying existing resources
+
+When changing an existing resource, write tests **only for the specific changes**:
+
+```hcl
+# Changing encryption from AES256 to KMS — test ONLY the encryption change
+run "verify_encryption_upgrade" {
+  command = plan
+
+  assert {
+    condition     = aws_s3_bucket_server_side_encryption_configuration.data.rule[0].apply_server_side_encryption_by_default[0].sse_algorithm == "aws:kms"
+    error_message = "Encryption must be upgraded to KMS"
+  }
+}
+```
+
+## Test Patterns by Resource Type
+
+### Networking (VPC, subnets, security groups)
+
+```hcl
+run "verify_vpc_config" {
+  command = plan
+
+  assert {
+    condition     = aws_vpc.main.cidr_block == "10.0.0.0/16"
+    error_message = "VPC CIDR must be 10.0.0.0/16"
+  }
+
+  assert {
+    condition     = aws_vpc.main.enable_dns_hostnames == true
+    error_message = "DNS hostnames must be enabled"
+  }
+}
+
+run "verify_private_subnets" {
+  command = plan
+
+  assert {
+    condition     = length(aws_subnet.private) == 3
+    error_message = "Must have 3 private subnets (one per AZ)"
+  }
+}
+
+run "verify_no_open_ssh" {
+  command = plan
+
+  assert {
+    condition     = !contains([for r in aws_security_group_rule.ingress : r.cidr_blocks], ["0.0.0.0/0"]) || !contains([for r in aws_security_group_rule.ingress : r.from_port], 22)
+    error_message = "SSH must not be open to 0.0.0.0/0"
+  }
+}
+```
+
+### IAM roles and policies
+
+```hcl
+run "verify_least_privilege" {
+  command = plan
+
+  # Verify no wildcard actions
+  assert {
+    condition     = !strcontains(data.aws_iam_policy_document.task.json, "\"Action\":\"*\"")
+    error_message = "IAM policy must not use wildcard actions"
+  }
+
+  # Verify no wildcard resources
+  assert {
+    condition     = !strcontains(data.aws_iam_policy_document.task.json, "\"Resource\":\"*\"")
+    error_message = "IAM policy must not use wildcard resources"
+  }
+}
+```
+
+### Database (RDS)
+
+```hcl
+run "verify_database_security" {
+  command = plan
+
+  assert {
+    condition     = aws_db_instance.main.storage_encrypted == true
+    error_message = "Database storage must be encrypted"
+  }
+
+  assert {
+    condition     = aws_db_instance.main.publicly_accessible == false
+    error_message = "Database must not be publicly accessible"
+  }
+
+  assert {
+    condition     = aws_db_instance.main.deletion_protection == true
+    error_message = "Deletion protection must be enabled"
+  }
+
+  assert {
+    condition     = aws_db_instance.main.backup_retention_period >= 7
+    error_message = "Backup retention must be at least 7 days"
+  }
+}
+```
+
+### Tags
+
+```hcl
+run "verify_required_tags" {
+  command = plan
+
+  assert {
+    condition     = aws_s3_bucket.data.tags["Environment"] == var.environment
+    error_message = "Environment tag must be set"
+  }
+
+  assert {
+    condition     = aws_s3_bucket.data.tags["ManagedBy"] == "terraform"
+    error_message = "ManagedBy tag must be 'terraform'"
+  }
+
+  assert {
+    condition     = aws_s3_bucket.data.tags["Project"] != null
+    error_message = "Project tag must be set"
+  }
+}
+```
+
+### Outputs
+
+```hcl
+run "verify_outputs" {
+  command = plan
+
+  assert {
+    condition     = output.bucket_arn != null
+    error_message = "bucket_arn output must be defined"
+  }
+
+  assert {
+    condition     = output.bucket_name == "myapp-test-data"
+    error_message = "bucket_name output must match expected value"
+  }
+}
+```
 
 ## Built-in Validation
 
@@ -251,52 +522,16 @@ terraform test -filter=tests/naming.tftest.hcl
 terraform test -verbose
 ```
 
-## Integration Testing with Terratest
-
-For complex infrastructure requiring real resource verification:
-
-```go
-// test/vpc_test.go
-package test
-
-import (
-    "testing"
-    "github.com/gruntwork-io/terratest/modules/terraform"
-    "github.com/stretchr/testify/assert"
-)
-
-func TestVpc(t *testing.T) {
-    t.Parallel()
-
-    opts := &terraform.Options{
-        TerraformDir: "../modules/networking",
-        Vars: map[string]interface{}{
-            "environment": "test",
-            "vpc_cidr":    "10.99.0.0/16",
-        },
-    }
-
-    defer terraform.Destroy(t, opts)
-    terraform.InitAndApply(t, opts)
-
-    vpcId := terraform.Output(t, opts, "vpc_id")
-    assert.NotEmpty(t, vpcId)
-
-    privateSubnets := terraform.OutputList(t, opts, "private_subnet_ids")
-    assert.Equal(t, 3, len(privateSubnets))
-}
-```
-
 ### When to use which testing approach
 
 | Approach | Speed | Cost | Best For |
 |----------|-------|------|----------|
+| `terraform test` (plan) | Seconds | Free | **Primary — TDD for all new resources** |
 | `terraform validate` | Instant | Free | Syntax errors, type mismatches |
 | `tflint` | Fast | Free | Best practice violations, invalid values |
 | `checkov`/`trivy` | Fast | Free | Security policy compliance |
-| `terraform test` (plan) | Seconds | Free | Logic verification without provisioning |
-| `terraform test` (apply) | Minutes | Real cost | End-to-end with real resources |
-| Terratest | Minutes | Real cost | Complex multi-step infrastructure tests |
+| `terraform test` (apply) | Minutes | Real cost | Runtime behavior verification |
+| Terratest | Minutes | Real cost | Complex multi-step Go-based tests |
 
 ## Plan Review Practices
 
@@ -365,6 +600,10 @@ jobs:
         run: terraform validate
         working-directory: terraform
 
+      - name: Terraform Test
+        run: terraform test
+        working-directory: terraform
+
       - name: tflint
         uses: terraform-linters/setup-tflint@v4
       - run: |
@@ -406,16 +645,17 @@ jobs:
 PR opened/updated:
   1. terraform fmt -check
   2. terraform validate
-  3. tflint
-  4. checkov / trivy
-  5. terraform plan
-  6. Post plan as PR comment
+  3. terraform test
+  4. tflint
+  5. checkov / trivy
+  6. terraform plan
+  7. Post plan as PR comment
 
 PR merged to main:
-  7. terraform plan (verify)
-  8. Manual approval gate
-  9. terraform apply
-  10. Post-apply verification
+  8. terraform plan (verify)
+  9. Manual approval gate
+  10. terraform apply
+  11. Post-apply verification
 ```
 
 ### Pre-commit hooks
