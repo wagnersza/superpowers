@@ -9,7 +9,7 @@
 - [Linting with tflint](#linting-with-tflint)
 - [Security Scanning](#security-scanning)
 - [Plan Review Practices](#plan-review-practices)
-- [CI/CD Pipeline Patterns](#cicd-pipeline-patterns)
+- [Local Validation Workflow](#local-validation-workflow)
 
 ## TDD with Terraform Test
 
@@ -454,74 +454,6 @@ resource "aws_s3_bucket" "public_assets" {
 
 Only suppress checks with a clear justification comment.
 
-## Terraform Test Framework
-
-Native testing (Terraform 1.6+) using `.tftest.hcl` files:
-
-### Unit test (no real resources)
-
-```hcl
-# tests/naming.tftest.hcl
-variables {
-  project     = "myapp"
-  environment = "dev"
-}
-
-run "verify_naming" {
-  command = plan
-
-  assert {
-    condition     = aws_s3_bucket.this.bucket == "myapp-dev-data"
-    error_message = "Bucket name should follow naming convention"
-  }
-
-  assert {
-    condition     = aws_s3_bucket.this.tags["Environment"] == "dev"
-    error_message = "Environment tag should match variable"
-  }
-}
-```
-
-### Integration test (creates real resources)
-
-```hcl
-# tests/integration.tftest.hcl
-variables {
-  project     = "test"
-  environment = "test"
-}
-
-run "create_infrastructure" {
-  command = apply
-
-  assert {
-    condition     = output.vpc_id != ""
-    error_message = "VPC should be created"
-  }
-}
-
-run "verify_network" {
-  command = plan
-
-  module {
-    source = "./tests/verify-network"
-  }
-}
-```
-
-### Running tests
-
-```bash
-# Run all tests
-terraform test
-
-# Run specific test file
-terraform test -filter=tests/naming.tftest.hcl
-
-# Verbose output
-terraform test -verbose
-```
-
 ### When to use which testing approach
 
 | Approach | Speed | Cost | Best For |
@@ -530,8 +462,7 @@ terraform test -verbose
 | `terraform validate` | Instant | Free | Syntax errors, type mismatches |
 | `tflint` | Fast | Free | Best practice violations, invalid values |
 | `checkov`/`trivy` | Fast | Free | Security policy compliance |
-| `terraform test` (apply) | Minutes | Real cost | Runtime behavior verification |
-| Terratest | Minutes | Real cost | Complex multi-step Go-based tests |
+| `terraform test` (apply) | Minutes | Real cost | Runtime behavior verification (use sparingly) |
 
 ## Plan Review Practices
 
@@ -565,117 +496,30 @@ terraform show -json tfplan | jq '.resource_changes[] | {action: .change.actions
 - **Large number of changes** when you only modified a few resources
 - **Changes to resources you didn't touch** — may indicate state drift
 
-## CI/CD Pipeline Patterns
+## Local Validation Workflow
 
-### GitHub Actions example
-
-```yaml
-name: Terraform
-on:
-  pull_request:
-    paths: ['terraform/**']
-  push:
-    branches: [main]
-    paths: ['terraform/**']
-
-jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "1.7.0"
-
-      - name: Format Check
-        run: terraform fmt -check -recursive
-        working-directory: terraform
-
-      - name: Init
-        run: terraform init -backend=false
-        working-directory: terraform
-
-      - name: Validate
-        run: terraform validate
-        working-directory: terraform
-
-      - name: Terraform Test
-        run: terraform test
-        working-directory: terraform
-
-      - name: tflint
-        uses: terraform-linters/setup-tflint@v4
-      - run: |
-          tflint --init
-          tflint --recursive
-        working-directory: terraform
-
-      - name: Security Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: config
-          scan-ref: terraform
-          severity: HIGH,CRITICAL
-
-  plan:
-    needs: validate
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-
-      - name: Plan
-        run: |
-          terraform init
-          terraform plan -no-color -out=tfplan
-        working-directory: terraform
-
-      - name: Comment PR
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Post plan output as PR comment
-```
-
-### Pipeline stages
-
-```
-PR opened/updated:
-  1. terraform fmt -check
-  2. terraform validate
-  3. terraform test
-  4. tflint
-  5. checkov / trivy
-  6. terraform plan
-  7. Post plan as PR comment
-
-PR merged to main:
-  8. terraform plan (verify)
-  9. Manual approval gate
-  10. terraform apply
-  11. Post-apply verification
-```
-
-### Pre-commit hooks
-
-```yaml
-# .pre-commit-config.yaml
-repos:
-  - repo: https://github.com/antonbabenko/pre-commit-terraform
-    rev: v1.88.0
-    hooks:
-      - id: terraform_fmt
-      - id: terraform_validate
-      - id: terraform_tflint
-      - id: terraform_docs
-      - id: terraform_checkov
-```
+Run this sequence locally before handing off to the user for apply. This mirrors the superpowers workflow: discover → test → implement → validate → plan → handoff.
 
 ```bash
-# Install and run
-pip install pre-commit
-pre-commit install
-pre-commit run --all-files
+# 1. Format
+terraform fmt -recursive
+
+# 2. Validate syntax
+terraform validate
+
+# 3. Run tests (TDD — should already be passing from your RED-GREEN-REFACTOR cycle)
+terraform test
+
+# 4. Lint (if tflint is available)
+tflint --recursive
+
+# 5. Security scan (if checkov/trivy is available)
+checkov -d . --framework terraform
+
+# 6. Plan — review output carefully
+terraform plan -var-file=prod.tfvars
+
+# 7. Handoff — present plan and apply command to user (NEVER apply yourself)
 ```
+
+**This is a local developer workflow, not a CI/CD pipeline.** You run these steps interactively during development. The human operator makes the final decision to apply.

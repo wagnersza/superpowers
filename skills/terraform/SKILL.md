@@ -273,4 +273,4 @@ Consult these based on the task:
 - **[references/modules.md](references/modules.md)** — Module structure, composition, input/output design, when to modularize. Read when creating or refactoring modules.
 - **[references/security.md](references/security.md)** — Encryption, secrets management, IAM, network security, compliance scanning. Read when configuring any security-sensitive resource.
 - **[references/state-management.md](references/state-management.md)** — Backend configuration, state isolation, workspaces, locking, migration. Read when setting up or modifying state management.
-- **[references/testing-validation.md](references/testing-validation.md)** — fmt, validate, tflint, checkov, tfsec, terratest, CI/CD patterns. Read when setting up validation pipelines or testing strategies.
+- **[references/testing-validation.md](references/testing-validation.md)** — TDD with terraform test, test patterns by resource type, fmt, validate, tflint, checkov, local validation workflow. Read when writing tests or validating Terraform code.
